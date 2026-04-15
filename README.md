@@ -49,8 +49,8 @@ This repository is intended **exclusively for cybersecurity education, authorize
 │ └── victim_win_ADMIN.py # Same as above + auto‑elevation
 │
 └── v3.5/
-├── README.md # User guide for v3.5
-├── TECHNICAL.md # Technical deep‑dive for v3.5
+├── README.md # User guide for v3.5 (in progress)
+├── TECHNICAL.md # Technical deep‑dive for v3.5 (in progress)
 ├── listener.py # Advanced listener (RC4 encryption)
 ├── victim_win.py # Full implant with 150+ commands
 └── victim_win_ADMIN.py # Full implant + admin capabilities
