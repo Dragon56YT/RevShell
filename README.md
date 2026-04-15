@@ -184,7 +184,7 @@ python listener.py
 python victim_win.py
 Once connected, you will have a shell> prompt where you can type commands. Type help to see available commands for that version.
 ````
-###📚 Learning Resources
+### 📚 Learning Resources
 - OWASP Reverse Shell Cheat Sheet
 
 - MITRE ATT&CK — Command and Control
