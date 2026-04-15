@@ -195,39 +195,62 @@ Once connected, you will have a shell> prompt where you can type commands. Type 
 
 ## 📄 License
 
-This work is licensed under the
-**Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License**
-(CC BY-NC-SA 4.0).
+This project is licensed under the  
+**Apache License 2.0**.
 
-To view a copy of this license, visit
-[https://creativecommons.org/licenses/by-nc-sa/4.0/](https://creativecommons.org/licenses/by-nc-sa/4.0/)
-or see the [LICENSE](LICENSE) file included in this repository.
+You may obtain a copy of the license at:  
+https://www.apache.org/licenses/LICENSE-2.0
 
-### Summary of Permissions
+---
 
-- ✅ **Share** — copy and redistribute the material in any medium or format.
-- ✅ **Adapt** — remix, transform, and build upon the material.
+## Copyright
 
-### Under the Following Terms
+Copyright (c) 2026 Dragon56YT
 
-- **Attribution** — You must give appropriate credit, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
-- **NonCommercial** — You may not use the material for **commercial purposes**. This includes selling the software, offering it as part of a paid service, or using it in any activity primarily intended for commercial advantage or monetary compensation.
-- **ShareAlike** — If you remix, transform, or build upon the material, you must distribute your contributions under the **same license** as the original.
+---
 
-### Important Note
+## Summary (informal)
 
-This license applies **only** to the code and documentation in this repository. It does **not** grant you permission to use this software in violation of any applicable laws. Unauthorized access to computer systems remains illegal regardless of the license.
+This software is free to use, modify, and distribute under the terms of the Apache 2.0 License.
 
-**No additional restrictions** — You may not apply legal terms or technological measures that legally restrict others from doing anything the license permits.
+You may:
 
-###⭐ Acknowledgements
-This project was created as an educational resource to help the cybersecurity community understand offensive techniques and improve defensive capabilities.
+- Use it for personal, educational, or commercial purposes  
+- Modify and distribute it  
+- Include it in proprietary or closed-source projects  
 
-Remember: With great power comes great responsibility. Use this knowledge ethically and legally.
+Provided that you:
 
-###📧 Contact
-This project is maintained as an open educational resource. For questions, suggestions, or to report issues, please open an issue on the GitHub repository.
+- Include a copy of the license  
+- Retain copyright and attribution notices  
+- Document significant changes if you redistribute modified versions  
 
-Do not contact the maintainers for help with illegal activities. Such requests will be ignored and reported.
+---
 
-RevShell Project — Made for education, not for crime.
+## Disclaimer
+
+This software is provided “as is”, without warranties or conditions of any kind, express or implied.
+
+The author is not responsible for any damages, misuse, or consequences arising from the use of this software.
+
+---
+
+## Important Notice
+
+This project is intended for **security research and educational purposes only**.
+
+Users are solely responsible for ensuring compliance with applicable laws and regulations in their jurisdiction.
+
+Unauthorized access to computer systems, data, or networks without explicit permission is illegal.
+
+---
+
+## Ethical Use
+
+This tool should only be used in:
+
+- Authorized penetration testing environments  
+- Security research labs  
+- Controlled educational settings with explicit permission  
+
+Any unauthorized use is strictly prohibited.
