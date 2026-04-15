@@ -22,6 +22,7 @@ This repository is intended **exclusively for cybersecurity education, authorize
 ---
 
 ## 📁 Repository Structure
+````
 .
 ├── v1.0/
 │ ├── README.md # User guide for v1.0
@@ -43,7 +44,7 @@ This repository is intended **exclusively for cybersecurity education, authorize
 ├── victim_win.py # Full implant with 150+ commands
 └── victim_win_ADMIN.py # Full implant + admin capabilities
 
-text
+````
 
 ---
 
