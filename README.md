@@ -14,16 +14,6 @@
 ╚═══════════════════════════════════════════════════════════════════════╝
 ````
 
-> ⚠️ **Disclaimer — Version 3.5 Documentation**
->
-> The documentation for **v3.5** is currently **in progress**.
->
-> It is not yet complete and translated.
->
-> A finalized version will be published in the coming days!
->
-
-
 ## 📖 Overview
 
 **RevShell** is a comprehensive educational project that demonstrates the evolution of a Windows reverse shell from a simple proof‑of‑concept to a fully‑featured post‑exploitation agent. The project is structured into three major versions, each building upon the previous one with increased capabilities, better stealth, and more advanced techniques.
