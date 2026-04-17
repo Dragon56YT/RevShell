@@ -184,6 +184,37 @@ python listener.py
 python victim_win.py
 Once connected, you will have a shell> prompt where you can type commands. Type help to see available commands for that version.
 ````
+---
+## 🚀 Future Roadmap
+
+My idea is to create a final **v4.0** with the following changes and improvements:
+
+- **Multihandler C2 Listener**  
+  A redesigned listener capable of managing multiple simultaneous sessions. New built‑in commands (`:sessions`, `:interact`, `:broadcast`, `:kill`, `:back`) will allow operators to switch between victims and send commands to all active implants at once.
+
+- **DLL Payload Generation**  
+  Compilation of the Python agent into a native Windows DLL using **Nuitka**, enabling reflective injection into legitimate processes (`explorer.exe`, `svchost.exe`). This eliminates the visible `python.exe` process and significantly improves stealth.
+
+- **Complete Resolution of Known Limitations**  
+  All v3.5 limitations will be addressed:
+  - Removal of file size caps during exfiltration (`steal`, `download_dir`).
+  - Fallback mechanisms for every command that currently relies on PowerShell.
+  - Reliable LSASS dumping with automatic `SeDebugPrivilege` acquisition.
+  - Direct microphone recording via `winmm.dll` without PowerShell.
+  - Additional webcam capture methods when WIA/ffmpeg are unavailable.
+  - Improved `autodestroy` that thoroughly wipes event logs and forensic traces.
+  - Configurable timeouts and exponential backoff for unreliable networks.
+
+- **Removal of Anti‑VM / Sandbox Checks**  
+  While the anti‑VM routines in v3.5 served as an excellent learning exercise, they have proven problematic in practice. They can generate false VM detections on legitimate hardware, trigger antivirus heuristics with high reliability, and are unnecessary in controlled educational environments where the tool is intended to be used. **All VM detection logic will be stripped out** in v4.0, making the implant leaner, more compatible, and less prone to signature‑based detection.
+
+- **Cross‑Platform Linux Agent**  
+  Once the Windows version is finalized, a dedicated Linux implant will be developed with feature parity: encrypted C2, persistence via `cron`/`systemd`, system enumeration, and native collection of SSH keys, bash history, and cloud credentials.
+
+These enhancements will transform RevShell into a professional‑grade educational C2 framework suitable for advanced red‑team simulations and defender training.
+
+---
+
 ### 📚 Learning Resources
 - OWASP Reverse Shell Cheat Sheet
 
